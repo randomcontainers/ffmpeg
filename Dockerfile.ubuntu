@@ -1,0 +1,159 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS source
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gpgv xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz /src/
+ADD https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz.asc /src/
+# FFmpeg release signing key, fingerprint FCF9 86EA 15E6 E293 A564 4F10 B432 2F04 D676 58D8
+COPY keys/ffmpeg-release.gpg /tmp/ffmpeg-release.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/ffmpeg-release.gpg "ffmpeg-${VERSION}.tar.xz.asc" "ffmpeg-${VERSION}.tar.xz"; \
+    mkdir ffmpeg; \
+    tar -xJf "ffmpeg-${VERSION}.tar.xz" -C ffmpeg --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+# The base image's packages are recorded before anything is installed, so that
+# runtime-deps can leave them out. Every image that installs runtime-deps is
+# built on the same base.
+RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      libaom-dev \
+      libass-dev \
+      libbluray-dev \
+      libbz2-dev \
+      libdav1d-dev \
+      libdrm-dev \
+      libfontconfig-dev \
+      libfreetype-dev \
+      libfribidi-dev \
+      libgnutls28-dev \
+      libharfbuzz-dev \
+      liblzma-dev \
+      libmp3lame-dev \
+      libopus-dev \
+      libsoxr-dev \
+      libsrt-gnutls-dev \
+      libsvtav1enc-dev \
+      libtheora-dev \
+      libva-dev \
+      libvidstab-dev \
+      libvorbis-dev \
+      libvpx-dev \
+      libwebp-dev \
+      libx264-dev \
+      libx265-dev \
+      libxml2-dev \
+      libzimg-dev \
+      libzmq3-dev \
+      nasm \
+      pkgconf \
+      zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY --link --from=source /src/ffmpeg /src/ffmpeg
+WORKDIR /src/ffmpeg
+ARG JOBS
+# Autodetection is off so that only the libraries listed here are linked,
+# whatever else the -dev packages pull in.
+RUN set -eu; \
+    ./configure \
+      --prefix=/usr/local \
+      --enable-gpl \
+      --enable-version3 \
+      --enable-shared \
+      --disable-static \
+      --disable-debug \
+      --disable-doc \
+      --disable-ffplay \
+      --disable-autodetect \
+      --enable-bzlib \
+      --enable-iconv \
+      --enable-lzma \
+      --enable-zlib \
+      --enable-gnutls \
+      --enable-libaom \
+      --enable-libass \
+      --enable-libbluray \
+      --enable-libdav1d \
+      --enable-libdrm \
+      --enable-libfontconfig \
+      --enable-libfreetype \
+      --enable-libfribidi \
+      --enable-libharfbuzz \
+      --enable-libmp3lame \
+      --enable-libopus \
+      --enable-libsoxr \
+      --enable-libsrt \
+      --enable-libsvtav1 \
+      --enable-libtheora \
+      --enable-libvidstab \
+      --enable-libvorbis \
+      --enable-libvpx \
+      --enable-libwebp \
+      --enable-libx264 \
+      --enable-libx265 \
+      --enable-libxml2 \
+      --enable-libzimg \
+      --enable-libzmq \
+      --enable-vaapi; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make install DESTDIR=/out; \
+    rm -rf /out/usr/local/include /out/usr/local/lib/pkgconfig /out/usr/local/share/ffmpeg/examples
+
+ARG BASE_IMAGE
+ARG VERSION
+# runtime-deps lists the packages that own the libraries the binaries load,
+# minus the base image's packages, plus the packages in runtime-deps.ubuntu.
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    meta=/out/usr/local/share/randomcontainers/ffmpeg; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYING.* LICENSE.md "$meta/licenses/"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz" \
+      "https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz.asc" \
+      "https://github.com/randomcontainers/ffmpeg/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | head -n 1)"; \
+      LD_LIBRARY_PATH=/out/usr/local/lib /out/usr/local/bin/ffmpeg -hide_banner -buildconf; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 env LD_LIBRARY_PATH=/out/usr/local/lib ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | sort -u | comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/ffmpeg/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "ffmpeg"]
+CMD ["-version"]
