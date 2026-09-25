@@ -1,0 +1,94 @@
+name: ffmpeg
+title: FFmpeg
+summary: Converts, filters and streams audio and video. Built from the signed FFmpeg release, with x264, x265, VP9, AV1, Opus, MP3 and subtitle rendering.
+homepage: https://ffmpeg.org/
+license: GPL-3.0-or-later
+source-release: true
+upstream:
+  source: github-tag
+  repository: FFmpeg/FFmpeg
+  tag-pattern: '^n(\d+\.\d+(?:\.\d+)?)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 9.0.2
+  artifact:
+    url: https://ffmpeg.org/releases/ffmpeg-{version}.tar.xz
+    signature: https://ffmpeg.org/releases/ffmpeg-{version}.tar.xz.asc
+    sha256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+funding:
+  - https://ffmpeg.org/donations.html
+image:
+  entrypoint: [ffmpeg]
+  cmd: [-version]
+test:
+  - |
+    ffmpeg -hide_banner -version > version.txt
+    head -n 1 version.txt | grep -Fq "ffmpeg version $VERSION "
+    ffprobe -hide_banner -version | head -n 1 | grep -Fq "ffprobe version $VERSION "
+  - |
+    ffmpeg -hide_banner -buildconf > buildconf.txt
+    grep -Fq -- --enable-gpl buildconf.txt
+    grep -Fq -- --enable-version3 buildconf.txt
+    if grep -Fq -- --enable-nonfree buildconf.txt; then echo "nonfree build" >&2; exit 1; fi
+  - |
+    for f in /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/lib/lib*.so.*; do
+      test -e "$f"
+      ldd "$f" > ldd.txt 2>&1 || true
+      if grep -Eq 'not found|Error loading shared library|Error relocating' ldd.txt; then
+        echo "$f:" >&2
+        cat ldd.txt >&2
+        exit 1
+      fi
+    done
+  - |
+    test -s /etc/ssl/certs/ca-certificates.crt
+    ffmpeg -hide_banner -encoders > encoders.txt
+    for e in libx264 libx265 libvpx-vp9 libaom-av1 libsvtav1 libopus libmp3lame libvorbis libtheora libwebp; do
+      grep -qw -- "$e" encoders.txt || { echo "missing encoder: $e" >&2; exit 1; }
+    done
+    ffmpeg -hide_banner -decoders > decoders.txt
+    grep -qw libdav1d decoders.txt
+    ffmpeg -hide_banner -filters > filters.txt
+    for f in ass drawtext subtitles vidstabdetect zmq zscale; do
+      grep -qw -- "$f" filters.txt || { echo "missing filter: $f" >&2; exit 1; }
+    done
+    ffmpeg -hide_banner -protocols > protocols.txt
+    for p in bluray https srt tls; do
+      grep -qw -- "$p" protocols.txt || { echo "missing protocol: $p" >&2; exit 1; }
+    done
+    ffmpeg -hide_banner -demuxers > demuxers.txt
+    grep -qw dash demuxers.txt
+    ffmpeg -hide_banner -hwaccels > hwaccels.txt
+    grep -qw vaapi hwaccels.txt
+  - |
+    export SVT_LOG=1
+    run() { ffmpeg -hide_banner -loglevel error -y "$@"; }
+    v=testsrc2=size=320x240:rate=25:duration=1
+    a=sine=frequency=1000:duration=1
+    run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libx264 -c:a aac h264.mp4
+    run -f lavfi -i "$v" -f lavfi -i "$a" -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus vp9.webm
+    run -f lavfi -i "$v" -c:v libx265 -x265-params log-level=error hevc.mkv
+    run -f lavfi -i "$v" -frames:v 2 -c:v libaom-av1 -cpu-used 8 aom.mkv
+    run -f lavfi -i "$v" -frames:v 2 -c:v libsvtav1 -preset 8 svt.mkv
+    run -f lavfi -i "$v" -frames:v 1 -c:v libwebp frame.webp
+    run -f lavfi -i "$a" -c:a libmp3lame audio.mp3
+    run -f lavfi -i "$a" -af aresample=48000:resampler=soxr -c:a libvorbis audio.ogg
+    run -c:v libdav1d -i aom.mkv -f null -
+    for pair in h264.mp4:h264 vp9.webm:vp9 hevc.mkv:hevc aom.mkv:av1 svt.mkv:av1 frame.webp:webp; do
+      codec="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "${pair%%:*}")"
+      [ "$codec" = "${pair#*:}" ] || { echo "${pair%%:*}: expected ${pair#*:}, got $codec" >&2; exit 1; }
+    done
+  - |
+    printf '1\n00:00:00,000 --> 00:00:01,000\nsubtitle\n' > subs.srt
+    ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=black:size=320x240:duration=1 \
+      -vf "drawtext=text=ok:fontsize=24:fontcolor=white,subtitles=subs.srt,zscale=w=160:h=120" \
+      -frames:v 1 text.png 2> text.log
+    if [ -s text.log ]; then cat text.log >&2; exit 1; fi
+    test -s text.png
+examples:
+  - title: Convert a video to H.264 and AAC in an MP4 file
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" randomcontainers.com/ffmpeg -i input.mkv -c:v libx264 -crf 23 -c:a aac output.mp4
+  - title: Encode a video to AV1 with SVT-AV1 and Opus
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" randomcontainers.com/ffmpeg -i input.mp4 -c:v libsvtav1 -preset 8 -crf 35 -c:a libopus output.webm
+  - title: Show the streams in a file with ffprobe
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint ffprobe randomcontainers.com/ffmpeg -hide_banner input.mp4
