@@ -43,7 +43,7 @@ Not included: `ffplay`, nonfree components such as fdk-aac, CUDA and NVENC, Vulk
 
 ## Default or slim
 
-FFmpeg's default image adds no other tools, so `latest` and `slim` are the same image: `ffmpeg`, `ffprobe` and the libraries they link against. Use `latest` to run it and the `slim` tags as a base for your own image. The default images of [yt-dlp](https://github.com/randomcontainers/yt-dlp) and [Streamlink](https://github.com/randomcontainers/streamlink) include this build of FFmpeg.
+FFmpeg's default image adds no other tools, so `latest` and `slim` are the same image: `ffmpeg`, `ffprobe` and the libraries they link against. Use `latest` to run it and the `slim` tags as a base for your own image. The default images of [yt-dlp](https://github.com/randomcontainers/yt-dlp), [Streamlink](https://github.com/randomcontainers/streamlink), [MediaInfo](https://github.com/randomcontainers/mediainfo), [MKVToolNix](https://github.com/randomcontainers/mkvtoolnix) and [whisper.cpp](https://github.com/randomcontainers/whisper-cpp) include this build of FFmpeg.
 
 ## Tags
 
@@ -142,7 +142,7 @@ The corresponding source for each image:
 - Ubuntu packages: the source packages on [Launchpad](https://launchpad.net/ubuntu) for the versions listed in the SBOM. `apt-get source <package>=<version>` fetches a version that is still in the Ubuntu archive.
 - Alpine packages: Alpine has no source packages. For the versions listed in the SBOM, the source is the APKBUILD and patches in [aports](https://gitlab.alpinelinux.org/alpine/aports/-/tree/3.24-stable), branch `3.24-stable`, and the archives on [distfiles.alpinelinux.org](https://distfiles.alpinelinux.org/distfiles/v3.24/).
 
-The yt-dlp and Streamlink default images and the combined images that include FFmpeg are built on a slim FFmpeg image from this repository. Their `com.randomcontainers.members` label records the FFmpeg version and the digest of that image, whose own `org.opencontainers.image.revision` label names the commit here.
+The yt-dlp, Streamlink, MediaInfo and whisper.cpp default images and the combined images that include FFmpeg are built on a slim FFmpeg image from this repository. Their `com.randomcontainers.members` label records the FFmpeg version and the digest of that image, whose own `org.opencontainers.image.revision` label names the commit here.
 
 Some formats in the image, such as H.264 and HEVC, may be covered by patents in some countries. Check what applies where you use them.
 
