@@ -11,8 +11,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
   ghcr.io/randomcontainers/ffmpeg -i input.mkv -c:v libx264 -crf 23 -c:a aac output.mp4
 ```
 
-The same images can also be pulled as `randomcontainers.com/ffmpeg`.
-
 Encode a video to AV1 with SVT-AV1 and Opus:
 
 ```sh
