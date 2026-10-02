@@ -2,7 +2,7 @@ name: ffmpeg
 title: FFmpeg
 summary: Converts, filters and streams audio and video. Built from the signed FFmpeg release, with x264, x265, VP9, AV1, Opus, MP3 and subtitle rendering.
 homepage: https://ffmpeg.org/
-license: GPL-3.0-or-later
+license: GPL-3.0-or-later AND MPL-2.0 AND BSD-3-Clause AND Zlib AND Unlicense
 source-release: true
 upstream:
   source: github-tag
@@ -15,6 +15,16 @@ upstream:
     url: https://ffmpeg.org/releases/ffmpeg-{version}.tar.xz
     signature: https://ffmpeg.org/releases/ffmpeg-{version}.tar.xz.asc
     sha256: 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+  # SRT support. Alpine's libsrt package, and Ubuntu's outside Ubuntu Pro, lack
+  # upstream security fixes, so libsrt is compiled from its release tag.
+  # Upstream attaches no source tarball to its releases: this is GitHub's
+  # archive of the tag, whose files were compared with the tagged commit
+  # before the hash was pinned.
+  extra-artifacts:
+    libsrt:
+      version: 1.5.7
+      url: https://github.com/Haivision/srt/archive/refs/tags/v{version}.tar.gz
+      sha256: 017cd1e437ef2073a4dd10ddf7b55e86bc3d6ebac0393d13bd22f6a57055d32b
 image:
   entrypoint: [ffmpeg]
   cmd: [-version]
@@ -83,6 +93,46 @@ test:
       -frames:v 1 text.png 2> text.log
     if [ -s text.log ]; then cat text.log >&2; exit 1; fi
     test -s text.png
+  - |
+    set -- /usr/local/lib/libavformat.so.*
+    ldd "$1" > avformat-ldd.txt
+    srt="$(awk '$1 ~ /^libsrt\.so\./ { print $3 }' avformat-ldd.txt)"
+    case "$srt" in
+      /usr/local/lib/libsrt.so.*) ;;
+      *) cat avformat-ldd.txt >&2; echo "expected libavformat to load libsrt from /usr/local/lib, got '$srt'" >&2; exit 1 ;;
+    esac
+    # 1.5.6 fixed CVE-2026-55868 and CVE-2026-55869.
+    v="$(readlink -f "$srt")"
+    v="${v##*/libsrt.so.}"
+    if ! echo "$v" | awk -F. '{ exit !($1 > 1 || ($1 == 1 && ($2 > 5 || ($2 == 5 && $3 >= 6)))) }'; then
+      echo "expected libsrt 1.5.6 or later, got '$v'" >&2
+      exit 1
+    fi
+    url='srt://127.0.0.1:9000?passphrase=0123456789abcdef&pbkeylen=32'
+    ffmpeg -hide_banner -loglevel error -y -f mpegts -i "$url&mode=listener&listen_timeout=30000000&timeout=10000000" \
+      -c copy srt.ts 2> srt-rx.log &
+    rx=$!
+    sent=
+    for _ in 1 2 3 4 5; do
+      if ffmpeg -hide_banner -loglevel error -re -f lavfi -i testsrc2=size=320x240:rate=25:duration=2 \
+        -c:v libx264 -tune zerolatency -f mpegts "$url&linger=5" 2> srt-tx.log; then
+        sent=1
+        break
+      fi
+      sleep 1
+    done
+    wait "$rx" || :
+    if [ -z "$sent" ]; then cat srt-rx.log srt-tx.log >&2; echo "sending over SRT failed" >&2; exit 1; fi
+    if [ ! -s srt.ts ]; then cat srt-rx.log >&2; echo "the SRT listener wrote nothing to srt.ts" >&2; exit 1; fi
+    # ffprobe lists an MPEG-TS stream twice, under its program and on its own.
+    codec="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 srt.ts | awk 'NF { print; exit }')"
+    frames="$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 srt.ts | awk 'NF { print; exit }')"
+    case "$frames" in ''|*[!0-9]*) n=0 ;; *) n=$frames ;; esac
+    if [ "$codec" != h264 ] || [ "$n" -lt 25 ]; then
+      cat srt-rx.log >&2
+      echo "srt.ts: expected h264 with at least 25 of 50 frames, got '$codec' with '$frames'" >&2
+      exit 1
+    fi
 examples:
   - title: Convert a video to H.264 and AAC in an MP4 file
     command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/ffmpeg -i input.mkv -c:v libx264 -crf 23 -c:a aac output.mp4

@@ -1,6 +1,6 @@
 # ffmpeg
 
-Container images with `ffmpeg` and `ffprobe`, compiled from the signed [FFmpeg](https://ffmpeg.org/) release tarball against the codec libraries of Ubuntu or Alpine. The images are rebuilt when FFmpeg publishes a release and when the base image changes, for `linux/amd64` and `linux/arm64`.
+Container images with `ffmpeg` and `ffprobe`, compiled from the signed [FFmpeg](https://ffmpeg.org/) release tarball against the codec libraries of Ubuntu or Alpine. The SRT library, libsrt, is compiled from its upstream release too. The images are rebuilt when FFmpeg publishes a release and when the base image changes, for `linux/amd64` and `linux/arm64`.
 
 This is an unofficial build, not affiliated with or endorsed by the FFmpeg project. Report problems with the image in this repository and problems with FFmpeg itself [upstream](https://ffmpeg.org/bugreports.html).
 
@@ -34,10 +34,12 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
 | Audio | Opus, LAME (MP3), Vorbis, SoX resampler, and FFmpeg's own AAC encoder |
 | Text and subtitles | libass, FreeType, HarfBuzz, FriBidi, fontconfig, DejaVu fonts |
 | Filters | zimg (`zscale`), vid.stab, ZeroMQ (`zmq`) |
-| Input and network | TLS with the system CA certificates (GnuTLS on Ubuntu, OpenSSL on Alpine), SRT, DASH (libxml2), Blu-ray |
+| Input and network | TLS with the system CA certificates (GnuTLS on Ubuntu, OpenSSL on Alpine), SRT (libsrt with OpenSSL), DASH (libxml2), Blu-ray |
 | Hardware | VA-API and libdrm, without GPU drivers (see [Extending the slim image](#extending-the-slim-image)) |
 
-Not included: `ffplay`, nonfree components such as fdk-aac, CUDA and NVENC, Vulkan and libplacebo, VMAF. The exact configure flags are printed by `ffmpeg -buildconf` and stored in `/usr/local/share/randomcontainers/ffmpeg/buildinfo`.
+The libsrt packages of Alpine, and of Ubuntu outside Ubuntu Pro, lack the upstream fixes for CVE-2026-55868 and CVE-2026-55869, so libsrt is compiled here instead. It uses OpenSSL on both distros.
+
+Not included: `ffplay`, nonfree components such as fdk-aac, CUDA and NVENC, Vulkan and libplacebo, VMAF. The exact configure flags are printed by `ffmpeg -buildconf` and stored, with the libsrt version, in `/usr/local/share/randomcontainers/ffmpeg/buildinfo`.
 
 ## Default or slim
 
@@ -108,7 +110,9 @@ Each platform image also carries an SPDX SBOM that lists every distro package wi
 docker buildx imagetools inspect ghcr.io/randomcontainers/ffmpeg:latest --format '{{ json .SBOM }}'
 ```
 
-Before compiling, the build checks the tarball against the SHA-256 recorded in `package.yml` and its signature against the FFmpeg release signing key in `keys/ffmpeg-release.gpg` (fingerprint `FCF9 86EA 15E6 E293 A564 4F10 B432 2F04 D676 58D8`).
+libsrt is compiled here, so it is not in the SBOM and image scanners do not check it. Its version is in `/usr/local/share/randomcontainers/ffmpeg/buildinfo`.
+
+Before compiling, the build checks the FFmpeg tarball against the SHA-256 recorded in `package.yml` and its signature against the FFmpeg release signing key in `keys/ffmpeg-release.gpg` (fingerprint `FCF9 86EA 15E6 E293 A564 4F10 B432 2F04 D676 58D8`). [libsrt](https://github.com/Haivision/srt) attaches no source tarball to its releases, so the build downloads GitHub's archive of the release tag and checks it against the SHA-256 recorded in `package.yml`.
 
 ## Updates
 
@@ -116,26 +120,32 @@ The project checks the `n<version>` tags of [FFmpeg/FFmpeg](https://github.com/F
 
 The images of the current version are also rebuilt when the Ubuntu or Alpine base image changes and at least every 7 days, so distro security fixes reach the current tags.
 
+libsrt is pinned to a version in `package.yml` and does not follow its upstream releases automatically. Updating it is a commit to `package.yml`, which rebuilds the images of the current FFmpeg version.
+
 ## Building
 
 ```sh
 docker build -f Dockerfile.ubuntu --target slim \
   --build-arg VERSION=<version> \
   --build-arg SOURCE_SHA256=<sha256 from package.yml> \
+  --build-arg LIBSRT_VERSION=<version> \
+  --build-arg LIBSRT_SHA256=<sha256> \
   -t ffmpeg:local .
 ```
 
-Use `Dockerfile.alpine` for the Alpine image. `--build-arg JOBS=<n>` limits the number of parallel compile jobs.
+The `LIBSRT_*` values are the `version` and `sha256` of the `libsrt` entry under `extra-artifacts` in `package.yml`. Use `Dockerfile.alpine` for the Alpine image. `--build-arg JOBS=<n>` limits the number of parallel compile jobs.
 
 ## Licenses
 
 FFmpeg in these images is built with `--enable-gpl --enable-version3`, so the binaries are licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later). They link GPL libraries (x264, x265, vid.stab) and LGPL, BSD and other libraries from the distro, and each of those packages keeps its own license. FFmpeg's license files are in `/usr/local/share/randomcontainers/ffmpeg/licenses/`.
 
+libsrt is licensed under the Mozilla Public License 2.0 (MPL-2.0). It contains code from UDT under the BSD-3-Clause license, an MD5 implementation under the Zlib license and atomic operations released under the Unlicense, so the image's license label is `GPL-3.0-or-later AND MPL-2.0 AND BSD-3-Clause AND Zlib AND Unlicense`. Its license files are `LICENSE.libsrt`, `LICENSE.libsrt-udt`, `LICENSE.libsrt-md5` and `LICENSE.libsrt-atomic` in the same directory.
+
 FFmpeg's `libavcodec/jfdctfst.c`, `libavcodec/jfdctint_template.c` and `libavcodec/jrevdct.c` come from libjpeg, and the build does not change them. This software is based in part on the work of the Independent JPEG Group.
 
 The corresponding source for each image:
 
-- FFmpeg: every version has a GitHub release in this repository, named `v<version>`, with the exact `ffmpeg-<version>.tar.xz` that was compiled and its signature. `/usr/local/share/randomcontainers/ffmpeg/source` lists that release and the ffmpeg.org download URLs.
+- FFmpeg and libsrt: every FFmpeg version has a GitHub release in this repository, named `v<version>`, with the exact `ffmpeg-<version>.tar.xz` that was compiled, its signature, and the libsrt archive, named `v<libsrt version>.tar.gz`. `/usr/local/share/randomcontainers/ffmpeg/source` lists that release and the download URLs of both archives. When libsrt is updated, the release also keeps the archive of the earlier version.
 - Build scripts: this repository at the commit in the image's `org.opencontainers.image.revision` label. The Dockerfiles hold every configure flag.
 - Ubuntu packages: the source packages on [Launchpad](https://launchpad.net/ubuntu) for the versions listed in the SBOM. `apt-get source <package>=<version>` fetches a version that is still in the Ubuntu archive.
 - Alpine packages: Alpine has no source packages. For the versions listed in the SBOM, the source is the APKBUILD and patches in [aports](https://gitlab.alpinelinux.org/alpine/aports/-/tree/3.24-stable), branch `3.24-stable`, and the archives on [distfiles.alpinelinux.org](https://distfiles.alpinelinux.org/distfiles/v3.24/).

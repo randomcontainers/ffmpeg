@@ -23,6 +23,7 @@ RUN apk add --no-cache \
       aom-dev \
       build-base \
       bzip2-dev \
+      cmake \
       dav1d-dev \
       fontconfig-dev \
       freetype-dev \
@@ -32,13 +33,13 @@ RUN apk add --no-cache \
       libass-dev \
       libbluray-dev \
       libdrm-dev \
-      libsrt-dev \
       libtheora-dev \
       libva-dev \
       libvorbis-dev \
       libvpx-dev \
       libwebp-dev \
       libxml2-dev \
+      linux-headers \
       nasm \
       openssl-dev \
       opus-dev \
@@ -53,9 +54,38 @@ RUN apk add --no-cache \
       zeromq-dev \
       zimg-dev \
       zlib-dev
+ARG JOBS
+
+# Alpine's libsrt package lacks the fixes for CVE-2026-55868 and
+# CVE-2026-55869, so libsrt is compiled from the upstream release, with
+# OpenSSL, upstream's default crypto library. It is installed into /usr/local
+# for the FFmpeg build, and its shared library goes into the image.
+ARG LIBSRT_VERSION
+ARG LIBSRT_SHA256
+ADD --checksum=sha256:${LIBSRT_SHA256} https://github.com/Haivision/srt/archive/refs/tags/v${LIBSRT_VERSION}.tar.gz /src/srt.tar.gz
+WORKDIR /src/srt
+RUN set -eu; \
+    tar -xzf /src/srt.tar.gz --strip-components=1; \
+    grep -Fqx "set (SRT_VERSION ${LIBSRT_VERSION})" CMakeLists.txt || { echo "the archive is not libsrt ${LIBSRT_VERSION}" >&2; exit 1; }; \
+    cmake -S . -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DENABLE_APPS=OFF \
+      -DENABLE_ENCRYPTION=ON \
+      -DUSE_ENCLIB=openssl-evp \
+      -DENABLE_SHARED=ON \
+      -DENABLE_STATIC=OFF \
+      -DENABLE_UNITTESTS=OFF; \
+    cmake --build build -j"${JOBS:-$(nproc)}"; \
+    cmake --install build --strip; \
+    scanelf --needed --nobanner --format '%n#p' "/usr/local/lib/libsrt.so.${LIBSRT_VERSION}" | tr ',' '\n' > /tmp/libsrt-needed; \
+    grep -Fq libcrypto.so /tmp/libsrt-needed || { cat /tmp/libsrt-needed >&2; echo "libsrt does not link libcrypto" >&2; exit 1; }; \
+    mkdir -p /out/usr/local/lib; \
+    cp -P /usr/local/lib/libsrt.so.* /out/usr/local/lib/
+
 COPY --link --from=source /src/ffmpeg /src/ffmpeg
 WORKDIR /src/ffmpeg
-ARG JOBS
 # Autodetection is off so that only the libraries listed here are linked,
 # whatever else the -dev packages pull in.
 RUN set -eu; \
@@ -112,18 +142,28 @@ RUN --mount=type=bind,source=runtime-deps.alpine,target=/tmp/runtime-deps.extra 
     meta=/out/usr/local/share/randomcontainers/ffmpeg; \
     mkdir -p "$meta/licenses"; \
     cp COPYING.* LICENSE.md "$meta/licenses/"; \
+    cp /src/srt/LICENSE "$meta/licenses/LICENSE.libsrt"; \
+    awk '/\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /University of Illinois/) { printf "%s", b; f = 1; exit } } END { exit !f }' \
+      /src/srt/srtcore/api.cpp > "$meta/licenses/LICENSE.libsrt-udt"; \
+    awk '/\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /Aladdin Enterprises/) { printf "%s", b; f = 1; exit } } END { exit !f }' \
+      /src/srt/srtcore/md5.cpp > "$meta/licenses/LICENSE.libsrt-md5"; \
+    awk '{ print } /unlicense\.org/ { f = 1; exit } END { exit !f }' \
+      /src/srt/srtcore/atomic.h > "$meta/licenses/LICENSE.libsrt-atomic"; \
     echo "${VERSION}" > "$meta/version"; \
     printf '%s\n' \
       "https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz" \
       "https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz.asc" \
+      "https://github.com/Haivision/srt/archive/refs/tags/v${LIBSRT_VERSION}.tar.gz" \
       "https://github.com/randomcontainers/ffmpeg/releases/tag/v${VERSION}" \
       > "$meta/source"; \
     { \
       echo "base: ${BASE_IMAGE}"; \
       echo "compiler: $(cc --version | head -n 1)"; \
+      echo "libsrt: ${LIBSRT_VERSION}"; \
       LD_LIBRARY_PATH=/out/usr/local/lib /out/usr/local/bin/ffmpeg -hide_banner -buildconf; \
     } > "$meta/buildinfo"; \
     scanelf --needed --nobanner --format '%n#p' --recursive /out/usr/local | tr ',' '\n' | sort -u > /tmp/needed; \
+    grep -Eq '^libsrt\.so\.' /tmp/needed || { echo "FFmpeg does not link libsrt" >&2; exit 1; }; \
     while read -r so; do \
       if [ -n "$so" ] && [ -z "$(find /out -name "$so" -print -quit)" ]; then echo "so:$so"; fi; \
     done < /tmp/needed > /tmp/elf-deps; \

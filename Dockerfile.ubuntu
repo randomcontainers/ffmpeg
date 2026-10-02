@@ -30,6 +30,7 @@ RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential \
+      cmake \
       libaom-dev \
       libass-dev \
       libbluray-dev \
@@ -45,7 +46,7 @@ RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
       libmp3lame-dev \
       libopus-dev \
       libsoxr-dev \
-      libsrt-gnutls-dev \
+      libssl-dev \
       libsvtav1enc-dev \
       libtheora-dev \
       libva-dev \
@@ -62,9 +63,38 @@ RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
       pkgconf \
       zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
+ARG JOBS
+
+# Ubuntu ships the libsrt fixes for CVE-2026-55868 and CVE-2026-55869 only
+# through Ubuntu Pro, so libsrt is compiled from the upstream release, with
+# OpenSSL, upstream's default crypto library. It is installed into /usr/local
+# for the FFmpeg build, and its shared library goes into the image.
+ARG LIBSRT_VERSION
+ARG LIBSRT_SHA256
+ADD --checksum=sha256:${LIBSRT_SHA256} https://github.com/Haivision/srt/archive/refs/tags/v${LIBSRT_VERSION}.tar.gz /src/srt.tar.gz
+WORKDIR /src/srt
+RUN set -eu; \
+    tar -xzf /src/srt.tar.gz --strip-components=1; \
+    grep -Fqx "set (SRT_VERSION ${LIBSRT_VERSION})" CMakeLists.txt || { echo "the archive is not libsrt ${LIBSRT_VERSION}" >&2; exit 1; }; \
+    cmake -S . -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_LIBDIR=lib \
+      -DENABLE_APPS=OFF \
+      -DENABLE_ENCRYPTION=ON \
+      -DUSE_ENCLIB=openssl-evp \
+      -DENABLE_SHARED=ON \
+      -DENABLE_STATIC=OFF \
+      -DENABLE_UNITTESTS=OFF; \
+    cmake --build build -j"${JOBS:-$(nproc)}"; \
+    cmake --install build --strip; \
+    readelf -d "/usr/local/lib/libsrt.so.${LIBSRT_VERSION}" > /tmp/libsrt-dynamic; \
+    grep -Fq 'Shared library: [libcrypto.so' /tmp/libsrt-dynamic || { cat /tmp/libsrt-dynamic >&2; echo "libsrt does not link libcrypto" >&2; exit 1; }; \
+    mkdir -p /out/usr/local/lib; \
+    cp -P /usr/local/lib/libsrt.so.* /out/usr/local/lib/
+
 COPY --link --from=source /src/ffmpeg /src/ffmpeg
 WORKDIR /src/ffmpeg
-ARG JOBS
 # Autodetection is off so that only the libraries listed here are linked,
 # whatever else the -dev packages pull in.
 RUN set -eu; \
@@ -121,20 +151,31 @@ RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra 
     meta=/out/usr/local/share/randomcontainers/ffmpeg; \
     mkdir -p "$meta/licenses"; \
     cp COPYING.* LICENSE.md "$meta/licenses/"; \
+    cp /src/srt/LICENSE "$meta/licenses/LICENSE.libsrt"; \
+    awk '/\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /University of Illinois/) { printf "%s", b; f = 1; exit } } END { exit !f }' \
+      /src/srt/srtcore/api.cpp > "$meta/licenses/LICENSE.libsrt-udt"; \
+    awk '/\/\*/ { c = 1; b = "" } c { b = b $0 "\n" } c && /\*\// { c = 0; if (b ~ /Aladdin Enterprises/) { printf "%s", b; f = 1; exit } } END { exit !f }' \
+      /src/srt/srtcore/md5.cpp > "$meta/licenses/LICENSE.libsrt-md5"; \
+    awk '{ print } /unlicense\.org/ { f = 1; exit } END { exit !f }' \
+      /src/srt/srtcore/atomic.h > "$meta/licenses/LICENSE.libsrt-atomic"; \
     echo "${VERSION}" > "$meta/version"; \
     printf '%s\n' \
       "https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz" \
       "https://ffmpeg.org/releases/ffmpeg-${VERSION}.tar.xz.asc" \
+      "https://github.com/Haivision/srt/archive/refs/tags/v${LIBSRT_VERSION}.tar.gz" \
       "https://github.com/randomcontainers/ffmpeg/releases/tag/v${VERSION}" \
       > "$meta/source"; \
     { \
       echo "base: ${BASE_IMAGE}"; \
       echo "compiler: $(cc --version | head -n 1)"; \
+      echo "libsrt: ${LIBSRT_VERSION}"; \
       LD_LIBRARY_PATH=/out/usr/local/lib /out/usr/local/bin/ffmpeg -hide_banner -buildconf; \
     } > "$meta/buildinfo"; \
     find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
       | xargs -0 env LD_LIBRARY_PATH=/out/usr/local/lib ldd > /tmp/ldd 2>&1 || true; \
     if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    grep -E '^[[:space:]]+libsrt\.so\.' /tmp/ldd > /tmp/ldd-srt || { echo "FFmpeg does not link libsrt" >&2; exit 1; }; \
+    if grep -Fv '=> /out/usr/local/lib/libsrt.so.' /tmp/ldd-srt; then echo "FFmpeg loads a libsrt other than the one built here" >&2; exit 1; fi; \
     awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
     test -s /tmp/libs; \
     while read -r lib; do \
